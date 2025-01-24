@@ -5,7 +5,7 @@ import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
 import { IHats } from "hats-protocol/Interfaces/IHats.sol";
 
 /// @title HatsVotes
-/// @notice A Hats Protocol-enabled implementation of IVotes that uses hat ownership to determine voting power
+/// @notice A Hats Protocol-enabled implementation of IVotes that uses hat ownership to determine voting weight
 contract HatsVotes is IVotes {
   /*//////////////////////////////////////////////////////////////
                               ERRORS
@@ -25,7 +25,7 @@ contract HatsVotes is IVotes {
   event ClaimableForSet(bool claimableFor);
   event OwnerHatSet(uint256 ownerHat);
   event HatsVotesLocked();
-  event HatsVotingPowerSet(uint256[] hatIds, uint256[] votingPowers);
+  event HatsVotingWeightSet(uint256[] hatIds, uint256[] votingWeights);
 
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -36,14 +36,14 @@ contract HatsVotes is IVotes {
   /// @notice Whether the contract is locked from further admin changes
   bool public locked;
 
-  /// @notice Whether voting power can be claimed on behalf of hat wearers
+  /// @notice Whether voting weight can be claimed on behalf of hat wearers
   bool public claimableFor;
 
-  /// @notice The owner hat that can configure voting power
+  /// @notice The owner hat that can configure voting weight
   uint256 public ownerHat;
 
-  /// @notice Mapping of hat ID to voting power
-  mapping(uint256 hatId => uint256 votingPower) public hatVotingPower;
+  /// @notice Mapping of hat ID to voting weight
+  mapping(uint256 hatId => uint256 votingWeight) public hatVotingWeight;
 
   /// @notice Mapping of account to registered hat ID
   mapping(address voter => uint256 hatId) public registeredHats;
@@ -51,11 +51,17 @@ contract HatsVotes is IVotes {
   /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
-  constructor(address hats, uint256 _ownerHat, bool _claimableFor, uint256[] memory _hatIds, uint256[] memory _powers) {
+  constructor(
+    address hats,
+    uint256 _ownerHat,
+    bool _claimableFor,
+    uint256[] memory _hatIds,
+    uint256[] memory _weights
+  ) {
     HATS = IHats(hats);
     _setOwnerHat(_ownerHat);
     _setClaimableFor(_claimableFor);
-    _setHatsVotingPower(_hatIds, _powers);
+    _setHatsVotingWeight(_hatIds, _weights);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -66,11 +72,11 @@ contract HatsVotes is IVotes {
   function getVotes(address account) public view returns (uint256) {
     uint256 hat = registeredHats[account];
     if (hat == 0 || !HATS.isWearerOfHat(account, hat)) return 0;
-    return hatVotingPower[hat];
+    return hatVotingWeight[hat];
   }
 
-  /// @notice Returns voting power at a past timestamp, but since we don't support checkpointing, just returns current
-  /// power
+  /// @notice Returns voting weight at a past timestamp, but since we don't support checkpointing, just returns current
+  /// weight
   function getPastVotes(address account, uint256) external view returns (uint256) {
     return getVotes(account);
   }
@@ -102,23 +108,23 @@ contract HatsVotes is IVotes {
                             ADMIN FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Set voting power for a hat
+  /// @notice Set voting weight for a hat
   /// @dev Only callable by admin hat wearer
-  function setHatVotingPower(uint256[] memory hatIds, uint256[] memory powers) external {
+  function setHatVotingWeight(uint256[] memory hatIds, uint256[] memory weights) external {
     _checkUnlocked();
     _checkOwner();
-    _setHatsVotingPower(hatIds, powers);
+    _setHatsVotingWeight(hatIds, weights);
   }
 
-  /// @notice Set voting power for multiple hats
+  /// @notice Set voting weight for multiple hats
   /// @dev Only callable by admin hat wearer
-  function setHatsVotingPower(uint256[] memory hatIds, uint256[] memory powers) external {
+  function setHatsVotingWeight(uint256[] memory hatIds, uint256[] memory weights) external {
     _checkUnlocked();
     _checkOwner();
-    _setHatsVotingPower(hatIds, powers);
+    _setHatsVotingWeight(hatIds, weights);
   }
 
-  /// @notice Set whether voting power can be claimed on behalf of hat wearers
+  /// @notice Set whether voting weight can be claimed on behalf of hat wearers
   function setClaimableFor(bool _claimableFor) external {
     _checkUnlocked();
     _checkOwner();
@@ -144,8 +150,8 @@ contract HatsVotes is IVotes {
                         INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
   function _registerVoter(uint256 hatId, address account) internal {
-    // Check hat has voting power
-    if (hatVotingPower[hatId] == 0) revert HatsVotes_InvalidHat();
+    // Check hat has voting weight
+    if (hatVotingWeight[hatId] == 0) revert HatsVotes_InvalidHat();
 
     // Check account wears hat
     if (!HATS.isWearerOfHat(account, hatId)) revert HatsVotes_NotHatWearer();
@@ -173,11 +179,11 @@ contract HatsVotes is IVotes {
     emit ClaimableForSet(_claimableFor);
   }
 
-  function _setHatsVotingPower(uint256[] memory hatIds, uint256[] memory powers) internal {
+  function _setHatsVotingWeight(uint256[] memory hatIds, uint256[] memory weights) internal {
     for (uint256 i = 0; i < hatIds.length; i++) {
-      hatVotingPower[hatIds[i]] = powers[i];
+      hatVotingWeight[hatIds[i]] = weights[i];
     }
-    emit HatsVotingPowerSet(hatIds, powers);
+    emit HatsVotingWeightSet(hatIds, weights);
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -193,7 +199,7 @@ contract HatsVotes is IVotes {
 
   /*//////////////////////////////////////////////////////////////
                         EMPTY IVOTES IMPLEMENTATIONS
-    //////////////////////////////////////////////////////////////*/
+  //////////////////////////////////////////////////////////////*/
 
   function delegate(address) external pure {
     return;
