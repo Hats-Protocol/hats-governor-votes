@@ -1,171 +1,213 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
-import { IVotes } from "../lib/openzeppelin-contracts/contracts/governance/utils/IVotes.sol";
-import { IHats } from "../lib/hats-protocol/src/Interfaces/IHats.sol";
+import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
+import { IHats } from "hats-protocol/Interfaces/IHats.sol";
 
 /// @title HatsVotes
 /// @notice A Hats Protocol-enabled implementation of IVotes that uses hat ownership to determine voting power
 contract HatsVotes is IVotes {
-    /*//////////////////////////////////////////////////////////////
+  /*//////////////////////////////////////////////////////////////
                               ERRORS
-    //////////////////////////////////////////////////////////////*/
-    error HatsVotes_ZeroAddress();
-    error HatsVotes_ZeroVotingPower();
-    error HatsVotes_NotAdmin();
+  //////////////////////////////////////////////////////////////*/
+  error HatsVotes_NotAdmin();
+  error HatsVotes_InvalidHat();
+  error HatsVotes_NotHatWearer();
+  error HatsVotes_AlreadyRegistered();
+  error HatsVotes_NotClaimableFor();
+  error HatsVotes_ReregistrationNotAllowed();
+  error HatsVotes_Locked();
 
-    /*//////////////////////////////////////////////////////////////
+  /*//////////////////////////////////////////////////////////////
                               EVENTS
-    //////////////////////////////////////////////////////////////*/
-    event VotingPowerSet(uint256 hatId, uint256 votingPower);
-    event VotingHatAdded(uint256 hatId, uint256 votingPower);
-    event VotingHatRemoved(uint256 hatId);
+  //////////////////////////////////////////////////////////////*/
+  event VoterRegistered(uint256 hatId, address account);
+  event ClaimableForSet(bool claimableFor);
+  event OwnerHatSet(uint256 ownerHat);
+  event HatsVotesLocked();
+  event HatsVotingPowerSet(uint256[] hatIds, uint256[] votingPowers);
 
-    /*//////////////////////////////////////////////////////////////
+  /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
-    //////////////////////////////////////////////////////////////*/
-    /// @notice The Hats Protocol contract
-    IHats public immutable HATS;
+  //////////////////////////////////////////////////////////////*/
+  /// @notice The Hats Protocol contract
+  IHats public immutable HATS;
 
-    /// @notice The admin hat that can configure voting power
-    uint256 public immutable ADMIN_HAT;
+  /// @notice Whether the contract is locked from further admin changes
+  bool public locked;
 
-    /// @notice Mapping of hat ID to voting power
-    mapping(uint256 => uint256) public hatVotingPower;
+  /// @notice Whether voting power can be claimed on behalf of hat wearers
+  bool public claimableFor;
 
-    /// @notice Array of hat IDs that have voting power
-    uint256[] public votingHats;
+  /// @notice The owner hat that can configure voting power
+  uint256 public ownerHat;
 
-    /// @notice Mapping to track index of hat in votingHats array (+1)
-    mapping(uint256 => uint256) private votingHatIndex;
+  /// @notice Mapping of hat ID to voting power
+  mapping(uint256 hatId => uint256 votingPower) public hatVotingPower;
 
-    /*//////////////////////////////////////////////////////////////
+  /// @notice Mapping of account to registered hat ID
+  mapping(address voter => uint256 hatId) public registeredHats;
+
+  /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
-    //////////////////////////////////////////////////////////////*/
-    constructor(address hats, uint256 adminHat) {
-        if (hats == address(0)) revert HatsVotes_ZeroAddress();
-        HATS = IHats(hats);
-        ADMIN_HAT = adminHat;
+  //////////////////////////////////////////////////////////////*/
+  constructor(address hats, uint256 _ownerHat, bool _claimableFor, uint256[] memory _hatIds, uint256[] memory _powers) {
+    HATS = IHats(hats);
+    _setOwnerHat(_ownerHat);
+    _setClaimableFor(_claimableFor);
+    _setHatsVotingPower(_hatIds, _powers);
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                    IMPLEMENTED IVOTES FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Returns the current votes balance for `account`
+  function getVotes(address account) public view returns (uint256) {
+    uint256 hat = registeredHats[account];
+    if (hat == 0 || !HATS.isWearerOfHat(account, hat)) return 0;
+    return hatVotingPower[hat];
+  }
+
+  /// @notice Returns voting power at a past timestamp, but since we don't support checkpointing, just returns current
+  /// power
+  function getPastVotes(address account, uint256) external view returns (uint256) {
+    return getVotes(account);
+  }
+
+  /// @notice Returns the delegate for an account, which is the account itself
+  function delegates(address account) external pure returns (address) {
+    return account;
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                            USER FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Register yourself as a voter with a valid hat
+  function registerVoter(uint256 hatId) external {
+    _registerVoter(hatId, msg.sender);
+  }
+
+  /// @notice Register someone else as a voter with a valid hat
+  function registerVoterFor(uint256 hatId, address account) external {
+    if (!claimableFor) revert HatsVotes_NotClaimableFor();
+    if (HATS.isWearerOfHat(account, registeredHats[account])) {
+      revert HatsVotes_ReregistrationNotAllowed();
     }
+    _registerVoter(hatId, account);
+  }
 
-    /*//////////////////////////////////////////////////////////////
-                          EXTERNAL FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    /// @notice Returns the current votes balance for `account`
-    /// @dev Only checks hats that have been explicitly given voting power
-    function getVotes(address account) external view returns (uint256) {
-        uint256 votes;
-        uint256 length = votingHats.length;
-        for (uint256 i; i < length;) {
-            uint256 hatId = votingHats[i];
-            if (HATS.isWearerOfHat(account, hatId)) {
-                votes += hatVotingPower[hatId];
-            }
-            unchecked { ++i; }
-        }
-        return votes;
-    }
+  /*//////////////////////////////////////////////////////////////
+                            ADMIN FUNCTIONS
+  //////////////////////////////////////////////////////////////*/
 
-    /// @notice Set voting power for a hat
-    /// @dev Only callable by admin hat wearer
-    function setHatVotingPower(uint256 hatId, uint256 power) external {
-        // Check caller is admin
-        if (!HATS.isWearerOfHat(msg.sender, ADMIN_HAT)) revert HatsVotes_NotAdmin();
-      
+  /// @notice Set voting power for a hat
+  /// @dev Only callable by admin hat wearer
+  function setHatVotingPower(uint256[] memory hatIds, uint256[] memory powers) external {
+    _checkUnlocked();
+    _checkOwner();
+    _setHatsVotingPower(hatIds, powers);
+  }
 
-        // If setting to 0, remove from voting hats
-        if (power == 0) {
-            _removeVotingHat(hatId);
-            emit VotingHatRemoved(hatId);
-        } else {
-            // If hat not already in voting hats, add it
-            if (votingHatIndex[hatId] == 0) {
-                votingHats.push(hatId);
-                votingHatIndex[hatId] = votingHats.length;
-                emit VotingHatAdded(hatId, power);
-            }
-            hatVotingPower[hatId] = power;
-            emit VotingPowerSet(hatId, power);
-        }
-    }
+  /// @notice Set voting power for multiple hats
+  /// @dev Only callable by admin hat wearer
+  function setHatsVotingPower(uint256[] memory hatIds, uint256[] memory powers) external {
+    _checkUnlocked();
+    _checkOwner();
+    _setHatsVotingPower(hatIds, powers);
+  }
 
-    /*//////////////////////////////////////////////////////////////
-                        VIEW/PURE FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    /// @notice Returns the primary timepoint used by the contract
-    /// @dev Always returns current block number since we don't support historical votes
-    function clock() public view returns (uint48) {
-        return uint48(block.number);
-    }
+  /// @notice Set whether voting power can be claimed on behalf of hat wearers
+  function setClaimableFor(bool _claimableFor) external {
+    _checkUnlocked();
+    _checkOwner();
+    _setClaimableFor(_claimableFor);
+  }
 
-    /// @notice Returns how many clock values can fit in a timestamp
-    /// @dev Always returns 1 since we use block numbers directly
-    function CLOCK_MODE() public pure returns (string memory) {
-        return "mode=blocknumber&from=default";
-    }
+  /// @notice Set the owner hat
+  function setOwnerHat(uint256 _ownerHat) external {
+    _checkUnlocked();
+    _checkOwner();
+    _setOwnerHat(_ownerHat);
+  }
 
-    /// @notice Returns array of all hats with voting power
-    function getVotingHats() external view returns (uint256[] memory) {
-        return votingHats;
-    }
+  /// @notice Lock the contract from further admin changes
+  function lock() external {
+    _checkUnlocked();
+    _checkOwner();
+    locked = true;
+    emit HatsVotesLocked();
+  }
 
-    /*//////////////////////////////////////////////////////////////
+  /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    /// @dev Removes a hat from the votingHats array
-    function _removeVotingHat(uint256 hatId) internal {
-        uint256 index = votingHatIndex[hatId];
-        if (index > 0) {
-            // Convert from 1-based to 0-based index
-            index--;
-            
-            // Get index of last element
-            uint256 lastIndex = votingHats.length - 1;
-            
-            // If not last element, swap with last
-            if (index != lastIndex) {
-                uint256 lastHat = votingHats[lastIndex];
-                votingHats[index] = lastHat;
-                votingHatIndex[lastHat] = index + 1;
-            }
-            
-            // Remove last element
-            votingHats.pop();
-            delete votingHatIndex[hatId];
-            delete hatVotingPower[hatId];
-        }
-    }
+  function _registerVoter(uint256 hatId, address account) internal {
+    // Check hat has voting power
+    if (hatVotingPower[hatId] == 0) revert HatsVotes_InvalidHat();
 
-    /*//////////////////////////////////////////////////////////////
-                        EMPTY IMPLEMENTATIONS
+    // Check account wears hat
+    if (!HATS.isWearerOfHat(account, hatId)) revert HatsVotes_NotHatWearer();
+
+    // Register the hat
+    registeredHats[account] = hatId;
+    emit VoterRegistered(hatId, account);
+  }
+
+  function _checkOwner() internal view {
+    if (!HATS.isWearerOfHat(msg.sender, ownerHat)) revert HatsVotes_NotAdmin();
+  }
+
+  function _checkUnlocked() internal view {
+    if (locked) revert HatsVotes_Locked();
+  }
+
+  function _setOwnerHat(uint256 _ownerHat) internal {
+    ownerHat = _ownerHat;
+    emit OwnerHatSet(_ownerHat);
+  }
+
+  function _setClaimableFor(bool _claimableFor) internal {
+    claimableFor = _claimableFor;
+    emit ClaimableForSet(_claimableFor);
+  }
+
+  function _setHatsVotingPower(uint256[] memory hatIds, uint256[] memory powers) internal {
+    for (uint256 i = 0; i < hatIds.length; i++) {
+      hatVotingPower[hatIds[i]] = powers[i];
+    }
+    emit HatsVotingPowerSet(hatIds, powers);
+  }
+
+  /*//////////////////////////////////////////////////////////////
+                        VIEW/PURE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    /// @notice Not implemented - no historical votes support
-    function getPastVotes(address, uint256) external pure returns (uint256) {
-        return 0;
-    }
+  function clock() public view returns (uint48) {
+    return uint48(block.number);
+  }
 
-    /// @notice Not implemented - no delegation support  
-    function delegates(address) external pure returns (address) {
-        return address(0);
-    }
+  function CLOCK_MODE() public pure returns (string memory) {
+    return "mode=blocknumber&from=default";
+  }
 
-    /// @notice Not implemented - no delegation support
-    function delegate(address) external pure {
-        return;
-    }
+  /*//////////////////////////////////////////////////////////////
+                        EMPTY IVOTES IMPLEMENTATIONS
+    //////////////////////////////////////////////////////////////*/
 
-    /// @notice Not implemented - no delegation support
-    function delegateBySig(address, uint256, uint256, uint8, bytes32, bytes32) external pure {
-        return;
-    }
+  function delegate(address) external pure {
+    return;
+  }
 
-    /// @notice Not implemented - no checkpoints
-    function numCheckpoints(address) external pure returns (uint32) {
-        return 0;
-    }
+  function delegateBySig(address, uint256, uint256, uint8, bytes32, bytes32) external pure {
+    return;
+  }
 
-    /// @notice Not implemented - no historical supply support
-    function getPastTotalSupply(uint256) external pure returns (uint256) {
-        return 0;
-    }
-} 
+  function numCheckpoints(address) external pure returns (uint32) {
+    return 0;
+  }
+
+  function getPastTotalSupply(uint256) external pure returns (uint256) {
+    return 0;
+  }
+}
