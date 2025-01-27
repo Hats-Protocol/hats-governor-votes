@@ -21,7 +21,7 @@ contract HatsVotes is IVotes {
   /*//////////////////////////////////////////////////////////////
                               EVENTS
   //////////////////////////////////////////////////////////////*/
-  event VoterRegistered(uint256 hatId, address account);
+  event VoterRegistered(uint256 hatId, address account, uint256 timestamp);
   event ClaimableForSet(bool claimableFor);
   event OwnerHatSet(uint256 ownerHat);
   event HatsVotesLocked();
@@ -44,9 +44,15 @@ contract HatsVotes is IVotes {
 
   /// @notice Mapping of hat ID to voting weight
   mapping(uint256 hatId => uint256 votingWeight) public hatVotingWeight;
+  /// @notice Struct to store voter registration data
 
-  /// @notice Mapping of account to registered hat ID
-  mapping(address voter => uint256 hatId) public registeredHats;
+  struct VoterData {
+    uint256 hatId; // Full hat ID
+    uint256 registrationTime; // Keep exact timestamp for compatibility
+  }
+
+  /// @notice Mapping of account to voter data
+  mapping(address => VoterData) public voterData;
 
   /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -70,15 +76,20 @@ contract HatsVotes is IVotes {
 
   /// @notice Returns the current votes balance for `account`
   function getVotes(address account) public view returns (uint256) {
-    uint256 hat = registeredHats[account];
-    if (hat == 0 || !HATS.isWearerOfHat(account, hat)) return 0;
-    return hatVotingWeight[hat];
+    return _getVotes(voterData[account].hatId);
   }
 
-  /// @notice Returns voting weight at a past timestamp, but since we don't support checkpointing, just returns current
-  /// weight
-  function getPastVotes(address account, uint256) external view returns (uint256) {
-    return getVotes(account);
+  /// @notice Returns voting weight at a past timestamp
+  function getPastVotes(address account, uint256 timepoint) external view returns (uint256) {
+    VoterData memory data = voterData[account];
+    if (data.registrationTime > timepoint) return 0;
+    return _getVotes(data.hatId);
+  }
+
+  /// @notice Internal function to calculate votes from voter data
+  function _getVotes(uint256 hatId) internal view returns (uint256) {
+    if (!HATS.isWearerOfHat(msg.sender, hatId)) return 0;
+    return hatVotingWeight[hatId];
   }
 
   /// @notice Returns the delegate for an account, which is the account itself
@@ -98,7 +109,7 @@ contract HatsVotes is IVotes {
   /// @notice Register someone else as a voter with a valid hat
   function registerVoterFor(uint256 hatId, address account) external {
     if (!claimableFor) revert HatsVotes_NotClaimableFor();
-    if (HATS.isWearerOfHat(account, registeredHats[account])) {
+    if (HATS.isWearerOfHat(account, voterData[account].hatId)) {
       revert HatsVotes_ReregistrationNotAllowed();
     }
     _registerVoter(hatId, account);
@@ -156,9 +167,9 @@ contract HatsVotes is IVotes {
     // Check account wears hat
     if (!HATS.isWearerOfHat(account, hatId)) revert HatsVotes_NotHatWearer();
 
-    // Register the hat
-    registeredHats[account] = hatId;
-    emit VoterRegistered(hatId, account);
+    // Register the hat and timestamp
+    voterData[account] = VoterData({ hatId: hatId, registrationTime: block.timestamp });
+    emit VoterRegistered(hatId, account, block.timestamp);
   }
 
   function _checkOwner() internal view {
