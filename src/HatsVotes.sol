@@ -4,9 +4,13 @@ pragma solidity ^0.8.18;
 import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
 import { IHats } from "hats-protocol/Interfaces/IHats.sol";
 
+interface IHatMintHook {
+  function onHatMinted(uint256 hatId, address wearer, bytes memory hookData) external returns (bool success);
+}
+
 /// @title HatsVotes
 /// @notice A Hats Protocol-enabled implementation of IVotes that uses hat ownership to determine voting weight
-contract HatsVotes is IVotes {
+contract HatsVotes is IVotes, IHatMintHook {
   /*//////////////////////////////////////////////////////////////
                               ERRORS
   //////////////////////////////////////////////////////////////*/
@@ -107,12 +111,19 @@ contract HatsVotes is IVotes {
   }
 
   /// @notice Register someone else as a voter with a valid hat
-  function registerVoterFor(uint256 hatId, address account) external {
+  function registerVoterFor(uint256 hatId, address account) public {
     if (!claimableFor) revert HatsVotes_NotClaimableFor();
     if (HATS.isWearerOfHat(account, voterData[account].hatId)) {
       revert HatsVotes_ReregistrationNotAllowed();
     }
     _registerVoter(hatId, account);
+  }
+
+  /// @inheritdoc IHatMintHook
+  /// @notice This hook is called when a hat is minted from a hook-enabled contract, such as MultiClaimsHatter
+  function onHatMinted(uint256 hatId, address wearer, bytes memory /*hookData*/ ) external returns (bool success) {
+    registerVoterFor(hatId, wearer);
+    return true;
   }
 
   /*//////////////////////////////////////////////////////////////
