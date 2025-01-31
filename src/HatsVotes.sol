@@ -9,7 +9,9 @@ interface IHatMintHook {
 }
 
 /// @title HatsVotes
-/// @notice A Hats Protocol-enabled implementation of IVotes that uses hat ownership to determine voting weight
+/// @notice A Hats Protocol-enabled implementation of IVotes that assigns voting weight based on wearing a hat.
+///   Wearers of a hat can register to receive voting weight on proposals created after their registration.
+///   They must wear the hat to have voting weight at any point in time.
 contract HatsVotes is IVotes, IHatMintHook {
   /*//////////////////////////////////////////////////////////////
                               ERRORS
@@ -18,18 +20,29 @@ contract HatsVotes is IVotes, IHatMintHook {
   error HatsVotes_InvalidHat();
   error HatsVotes_NotHatWearer();
   error HatsVotes_AlreadyRegistered();
-  error HatsVotes_NotClaimableFor();
+  error HatsVotes_NotRegisterableFor();
   error HatsVotes_ReregistrationNotAllowed();
   error HatsVotes_Locked();
 
   /*//////////////////////////////////////////////////////////////
                               EVENTS
   //////////////////////////////////////////////////////////////*/
-  event VoterRegistered(uint256 hatId, address account, uint256 timestamp);
-  event ClaimableForSet(bool claimableFor);
+  event VoterRegistered(uint256 hatId, address voter, uint256 registrationTime);
+  event RegisterableForSet(bool registerableFor);
   event OwnerHatSet(uint256 ownerHat);
-  event HatsVotesLocked();
+  event Locked();
   event HatsVotingWeightSet(uint256[] hatIds, uint256[] votingWeights);
+
+  /*//////////////////////////////////////////////////////////////
+                              DATA MODELS
+  //////////////////////////////////////////////////////////////*/
+  /// @notice Struct to store a voter's registration data
+  /// @param hatId The hat with which the voter is registered
+  /// @param time The unix timestamp of when the voter registered
+  struct VoterRegistration {
+    uint256 hatId;
+    uint256 time;
+  }
 
   /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -37,26 +50,20 @@ contract HatsVotes is IVotes, IHatMintHook {
   /// @notice The Hats Protocol contract
   IHats public immutable HATS;
 
-  /// @notice Whether the contract is locked from further admin changes
+  /// @notice Whether the contract is locked from further owner changes
   bool public locked;
 
-  /// @notice Whether voting weight can be claimed on behalf of hat wearers
-  bool public claimableFor;
+  /// @notice Whether it is possible to register (ie claim voting weight) on behalf of a voter
+  bool public registerableFor;
 
   /// @notice The owner hat that can configure voting weight
   uint256 public ownerHat;
 
   /// @notice Mapping of hat ID to voting weight
   mapping(uint256 hatId => uint256 votingWeight) public hatVotingWeight;
-  /// @notice Struct to store voter registration data
 
-  struct VoterData {
-    uint256 hatId; // Full hat ID
-    uint256 registrationTime; // Keep exact timestamp for compatibility
-  }
-
-  /// @notice Mapping of account to voter data
-  mapping(address => VoterData) public voterData;
+  /// @notice Mapping of account to voter registration data
+  mapping(address voter => VoterRegistration registration) public voterRegistry;
 
   /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -64,15 +71,20 @@ contract HatsVotes is IVotes, IHatMintHook {
   constructor(
     address hats,
     uint256 _ownerHat,
-    bool _claimableFor,
+    bool _registerableFor,
     uint256[] memory _hatIds,
     uint256[] memory _weights
   ) {
     HATS = IHats(hats);
     _setOwnerHat(_ownerHat);
-    _setClaimableFor(_claimableFor);
+    _setRegisterableFor(_registerableFor);
     _setHatsVotingWeight(_hatIds, _weights);
   }
+
+  // TODO determine how instances of this contract should be deployed
+  // - via HatsModuleFactory (and then initialized with a setUp function)?
+  // - via some other create2 factory and then intialized with a setUp function?
+  // - with a standard constructor?
 
   /*//////////////////////////////////////////////////////////////
                     IMPLEMENTED IVOTES FUNCTIONS
@@ -80,20 +92,15 @@ contract HatsVotes is IVotes, IHatMintHook {
 
   /// @notice Returns the current votes balance for `account`
   function getVotes(address account) public view returns (uint256) {
-    return _getVotes(voterData[account].hatId);
+    return _getVotes(voterRegistry[account].hatId);
   }
 
   /// @notice Returns voting weight at a past timestamp
   function getPastVotes(address account, uint256 timepoint) external view returns (uint256) {
-    VoterData memory data = voterData[account];
-    if (data.registrationTime > timepoint) return 0;
-    return _getVotes(data.hatId);
-  }
-
-  /// @notice Internal function to calculate votes from voter data
-  function _getVotes(uint256 hatId) internal view returns (uint256) {
-    if (!HATS.isWearerOfHat(msg.sender, hatId)) return 0;
-    return hatVotingWeight[hatId];
+    VoterRegistration memory registration = voterRegistry[account];
+    // Voters must have registered before the timepoint to have voting weight
+    if (registration.time > timepoint) return 0;
+    return _getVotes(registration.hatId);
   }
 
   /// @notice Returns the delegate for an account, which is the account itself
@@ -102,7 +109,7 @@ contract HatsVotes is IVotes, IHatMintHook {
   }
 
   /*//////////////////////////////////////////////////////////////
-                            USER FUNCTIONS
+                    VOTER REGISTRATION FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Register yourself as a voter with a valid hat
@@ -112,10 +119,8 @@ contract HatsVotes is IVotes, IHatMintHook {
 
   /// @notice Register someone else as a voter with a valid hat
   function registerVoterFor(uint256 hatId, address account) public {
-    if (!claimableFor) revert HatsVotes_NotClaimableFor();
-    if (HATS.isWearerOfHat(account, voterData[account].hatId)) {
-      revert HatsVotes_ReregistrationNotAllowed();
-    }
+    require(registerableFor, HatsVotes_NotRegisterableFor());
+    require(!HATS.isWearerOfHat(account, voterRegistry[account].hatId), HatsVotes_ReregistrationNotAllowed());
     _registerVoter(hatId, account);
   }
 
@@ -127,68 +132,73 @@ contract HatsVotes is IVotes, IHatMintHook {
   }
 
   /*//////////////////////////////////////////////////////////////
-                            ADMIN FUNCTIONS
+                            OWNER FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Set voting weight for a hat
-  /// @dev Only callable by admin hat wearer
-  function setHatVotingWeight(uint256[] memory hatIds, uint256[] memory weights) external {
-    _checkUnlocked();
-    _checkOwner();
-    _setHatsVotingWeight(hatIds, weights);
-  }
-
   /// @notice Set voting weight for multiple hats
-  /// @dev Only callable by admin hat wearer
+  /// @dev Only callable by owner hat wearer and when contract is not locked
+  /// @param hatIds The hat IDs to set voting weight for
+  /// @param weights The voting weights to set for the hats
   function setHatsVotingWeight(uint256[] memory hatIds, uint256[] memory weights) external {
     _checkUnlocked();
     _checkOwner();
     _setHatsVotingWeight(hatIds, weights);
   }
 
-  /// @notice Set whether voting weight can be claimed on behalf of hat wearers
-  function setClaimableFor(bool _claimableFor) external {
+  /// @notice Set whether it is possible to register (ie claim voting weight) on behalf of a voter
+  /// @dev Only callable by owner hat wearer and when contract is not locked
+  function setRegisterableFor(bool _registerableFor) external {
     _checkUnlocked();
     _checkOwner();
-    _setClaimableFor(_claimableFor);
+    _setRegisterableFor(_registerableFor);
   }
 
   /// @notice Set the owner hat
+  /// @dev Only callable by owner hat wearer and when contract is not locked
   function setOwnerHat(uint256 _ownerHat) external {
     _checkUnlocked();
     _checkOwner();
     _setOwnerHat(_ownerHat);
   }
 
-  /// @notice Lock the contract from further admin changes
+  /// @notice Lock the contract from further owner changes
+  /// @dev Only callable by owner hat wearer and when contract is not locked
   function lock() external {
     _checkUnlocked();
     _checkOwner();
     locked = true;
-    emit HatsVotesLocked();
+    emit Locked();
   }
 
   /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Internal function to calculate a voter's voting weight from their registered hat. The voter must be
+  /// wearing the hat to have voting weight.
+  function _getVotes(uint256 hatId) internal view returns (uint256) {
+    if (HATS.isWearerOfHat(msg.sender, hatId)) return hatVotingWeight[hatId];
+    else return 0;
+  }
+
   function _registerVoter(uint256 hatId, address account) internal {
     // Check hat has voting weight
-    if (hatVotingWeight[hatId] == 0) revert HatsVotes_InvalidHat();
+    require(hatVotingWeight[hatId] > 0, HatsVotes_InvalidHat());
 
     // Check account wears hat
-    if (!HATS.isWearerOfHat(account, hatId)) revert HatsVotes_NotHatWearer();
+    require(HATS.isWearerOfHat(account, hatId), HatsVotes_NotHatWearer());
 
     // Register the hat and timestamp
-    voterData[account] = VoterData({ hatId: hatId, registrationTime: block.timestamp });
+    voterRegistry[account] = VoterRegistration({ hatId: hatId, time: block.timestamp });
     emit VoterRegistered(hatId, account, block.timestamp);
   }
 
   function _checkOwner() internal view {
-    if (!HATS.isWearerOfHat(msg.sender, ownerHat)) revert HatsVotes_NotAdmin();
+    require(HATS.isWearerOfHat(msg.sender, ownerHat), HatsVotes_NotAdmin());
   }
 
   function _checkUnlocked() internal view {
-    if (locked) revert HatsVotes_Locked();
+    require(!locked, HatsVotes_Locked());
   }
 
   function _setOwnerHat(uint256 _ownerHat) internal {
@@ -196,9 +206,9 @@ contract HatsVotes is IVotes, IHatMintHook {
     emit OwnerHatSet(_ownerHat);
   }
 
-  function _setClaimableFor(bool _claimableFor) internal {
-    claimableFor = _claimableFor;
-    emit ClaimableForSet(_claimableFor);
+  function _setRegisterableFor(bool _registerableFor) internal {
+    registerableFor = _registerableFor;
+    emit RegisterableForSet(_registerableFor);
   }
 
   function _setHatsVotingWeight(uint256[] memory hatIds, uint256[] memory weights) internal {
@@ -209,32 +219,33 @@ contract HatsVotes is IVotes, IHatMintHook {
   }
 
   /*//////////////////////////////////////////////////////////////
-                        VIEW/PURE FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-  function clock() public view returns (uint48) {
-    return uint48(block.number);
-  }
-
-  function CLOCK_MODE() public pure returns (string memory) {
-    return "mode=blocknumber&from=default";
-  }
-
-  /*//////////////////////////////////////////////////////////////
                         EMPTY IVOTES IMPLEMENTATIONS
   //////////////////////////////////////////////////////////////*/
 
+  /// @dev Not implemented since hats already represent delegated authority
   function delegate(address) external pure {
     return;
   }
 
+  /// @dev Not implemented since hats already represent delegated authority
   function delegateBySig(address, uint256, uint256, uint8, bytes32, bytes32) external pure {
     return;
   }
 
-  function numCheckpoints(address) external pure returns (uint32) {
-    return 0;
-  }
+  /* 
+  TODO should we implement this?
 
+  Option A: track registrations (* voting weight per hat)
+  - would require adding functionality to deregister voters, but any latency between the revocation of a hat and the
+  corresponding deregistration could distort quorum calculations
+  
+  Option B: sum up supply of all voting hats (* voting weight per hat)
+  - would require an iterable data structure for voting hats
+  - hat.supply is not always up to date, eg if there are dynamic hat revocations that don't update Hats.sol storage
+
+  Option C: don't implement
+  - incompatible with proportional quorum calculations
+  */
   function getPastTotalSupply(uint256) external pure returns (uint256) {
     return 0;
   }
