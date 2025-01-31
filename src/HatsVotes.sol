@@ -90,12 +90,12 @@ contract HatsVotes is IVotes, IHatMintHook {
                     IMPLEMENTED IVOTES FUNCTIONS
   //////////////////////////////////////////////////////////////*/
 
-  /// @notice Returns the current votes balance for `account`
+  /// @inheritdoc IVotes
   function getVotes(address account) public view returns (uint256) {
     return _getVotes(voterRegistry[account].hatId);
   }
 
-  /// @notice Returns voting weight at a past timestamp
+  /// @inheritdoc IVotes
   function getPastVotes(address account, uint256 timepoint) external view returns (uint256) {
     VoterRegistration memory registration = voterRegistry[account];
     // Voters must have registered before the timepoint to have voting weight
@@ -103,7 +103,8 @@ contract HatsVotes is IVotes, IHatMintHook {
     return _getVotes(registration.hatId);
   }
 
-  /// @notice Returns the delegate for an account, which is the account itself
+  /// @inheritdoc IVotes
+  /// @notice A voter's delegate is always themselves, since hats already represent delegated authority
   function delegates(address account) external pure returns (address) {
     return account;
   }
