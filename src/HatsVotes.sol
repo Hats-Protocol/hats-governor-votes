@@ -92,7 +92,7 @@ contract HatsVotes is IVotes, IHatMintHook {
 
   /// @inheritdoc IVotes
   function getVotes(address account) public view returns (uint256) {
-    return _getVotes(voterRegistry[account].hatId);
+    return _getVotes(voterRegistry[account].hatId, account);
   }
 
   /// @inheritdoc IVotes
@@ -100,7 +100,7 @@ contract HatsVotes is IVotes, IHatMintHook {
     VoterRegistration memory registration = voterRegistry[account];
     // Voters must have registered before the timepoint to have voting weight
     if (registration.time > timepoint) return 0;
-    return _getVotes(registration.hatId);
+    return _getVotes(registration.hatId, account);
   }
 
   /// @inheritdoc IVotes
@@ -114,11 +114,15 @@ contract HatsVotes is IVotes, IHatMintHook {
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Register yourself as a voter with a valid hat
+  /// @param hatId The hat to register with
   function registerVoter(uint256 hatId) external {
     _registerVoter(hatId, msg.sender);
   }
 
   /// @notice Register someone else as a voter with a valid hat
+  /// @dev Only callable when registerableFor is true
+  /// @param hatId The hat to register with
+  /// @param account The account to register
   function registerVoterFor(uint256 hatId, address account) public {
     require(registerableFor, HatsVotes_NotRegisterableFor());
     _registerVoter(hatId, account);
@@ -126,6 +130,8 @@ contract HatsVotes is IVotes, IHatMintHook {
 
   /// @inheritdoc IHatMintHook
   /// @notice This hook is called when a hat is minted from a hook-enabled contract, such as MultiClaimsHatter
+  /// @param hatId The hat to register with
+  /// @param wearer The account to register
   function onHatMinted(uint256 hatId, address wearer, bytes memory /*hookData*/ ) external returns (bool success) {
     registerVoterFor(hatId, wearer);
     return true;
@@ -176,8 +182,8 @@ contract HatsVotes is IVotes, IHatMintHook {
 
   /// @notice Internal function to calculate a voter's voting weight from their registered hat. The voter must be
   /// wearing the hat to have voting weight.
-  function _getVotes(uint256 hatId) internal view returns (uint256) {
-    if (HATS.isWearerOfHat(msg.sender, hatId)) return hatVotingWeight[hatId];
+  function _getVotes(uint256 hatId, address account) internal view returns (uint256) {
+    if (HATS.isWearerOfHat(account, hatId)) return hatVotingWeight[hatId];
     else return 0;
   }
 
@@ -191,7 +197,7 @@ contract HatsVotes is IVotes, IHatMintHook {
     // Check account wears hat
     require(HATS.isWearerOfHat(account, hatId), HatsVotes_NotHatWearer());
 
-    // Register the hat and timestamp
+    // Register the voter with the hat and current timestamp
     voterRegistry[account] = VoterRegistration({ hatId: hatId, time: block.timestamp });
     emit VoterRegistered(hatId, account, block.timestamp);
   }
