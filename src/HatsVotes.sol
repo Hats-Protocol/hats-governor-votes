@@ -121,7 +121,6 @@ contract HatsVotes is IVotes, IHatMintHook {
   /// @notice Register someone else as a voter with a valid hat
   function registerVoterFor(uint256 hatId, address account) public {
     require(registerableFor, HatsVotes_NotRegisterableFor());
-    require(!HATS.isWearerOfHat(account, voterRegistry[account].hatId), HatsVotes_ReregistrationNotAllowed());
     _registerVoter(hatId, account);
   }
 
@@ -185,6 +184,9 @@ contract HatsVotes is IVotes, IHatMintHook {
   function _registerVoter(uint256 hatId, address account) internal {
     // Check hat has voting weight
     require(hatVotingWeight[hatId] > 0, HatsVotes_InvalidHat());
+
+    // Check that the voter is not already registered for this hat
+    require(voterRegistry[account].hatId != hatId, HatsVotes_AlreadyRegistered());
 
     // Check account wears hat
     require(HATS.isWearerOfHat(account, hatId), HatsVotes_NotHatWearer());
